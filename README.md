@@ -1,61 +1,63 @@
 # JobWatch — an AI-Ops on-caller for a daily data pipeline
 
-A small financial-data pipeline (yfinance → Postgres) paired with an LLM
-diagnosis loop that turns a raw `job_runs` row into a plain-English incident
-report delivered to Slack + stdout + a local log.
 
-The interesting part isn't the pipeline. It's what happens **after** a failure:
-the monitor notices, Claude reads the audit row and queries an MCP server for
-supporting evidence, and writes a three-section incident summary citing the
-actual rows and error messages.
+JobWatch is an **AI-powered on-call assistant for a financial data pipeline**. Its core idea is simple: instead of just recording that a pipeline failed, it automatically investigates the failure using an AI (Claude/Anthropic) and produces a plain-English incident report — almost like having a junior SRE who wakes up when something breaks, looks at the evidence, and writes up what happened.
 
 ---
 
-## Before / after
+## What does the pipeline do?
 
-**Raw `job_runs` row that a human would get paged on:**
-
-```
-job_id=7 status=failed rows_written=0 error_type=NoRowsWritten
-duration_sec=1.78
-log_snippet: yfinance HTTP 404 for ZZZZZ, DELIST1, NOTREAL; each "possibly delisted"
-```
-
-**What Slack / `incidents.log` actually receives:**
-
-> **Root cause**
->
-> Job 7 failed with error type `NoRowsWritten` because the pipeline attempted to fetch OHLCV data for three ticker symbols—ZZZZZ, DELIST1, and NOTREAL—all of which returned HTTP 404 errors and "possibly delisted" warnings from yfinance. The log shows each ticker returned zero rows, resulting in 0 rows written across all tickers.
->
-> **Evidence**
->
-> - **get_job_log**: Job 7 log_snippet shows three consecutive yfinance HTTP 404s for ZZZZZ, DELIST1, NOTREAL.
-> - **get_last_job_metrics**: `rows_written: 0`, `error_type: "NoRowsWritten"`, `duration_sec: 1.78`.
->
-> **Recommended action**
->
-> Remove ZZZZZ, DELIST1, and NOTREAL from the ticker ingestion list, as they are invalid or delisted symbols that yfinance cannot resolve.
-
-Two more captured incidents live in [`docs/sample_incidents/`](docs/sample_incidents).
+There is a scheduled data pipeline that:
+- **Fetches stock market data** (OHLCV — Open, High, Low, Close, Volume) for a configured list of tickers from Yahoo Finance.
+- **Transforms it** — calculating rolling averages and flagging statistical anomalies.
+- **Stores it** in a PostgreSQL database.
+- Every time it runs, it **records metadata about that run** — how many rows were written, whether it succeeded or failed, and a snippet of any error logs.
 
 ---
 
-## Architecture
+## What does the monitor do?
 
-See [`docs/architecture.md`](docs/architecture.md) for the Mermaid diagram.
+A separate **monitor** process keeps an eye on those run records. Every few seconds it checks:
+- Did any run **fail**?
+- Did any run write **fewer rows than expected** (a silent failure)?
 
-Four moving parts:
+When either of those happens, it triggers the diagnosis process.
 
-- **pipeline** — one-shot ingest; writes `ohlcv` rows and a `job_runs` audit row.
-- **monitor** — long-running poll over `job_runs`; triggers diagnosis on failures or `rows_written < threshold`.
-- **mcp_server** — stdio MCP server exposing three tools (`query_recent_rows`, `get_job_log`, `get_last_job_metrics`) + Prometheus on `:9100`.
-- **postgres** — one container, host port `5434`, schema in `sql/schema.sql`.
+---
+
+## What does the AI diagnosis do?
+
+When a bad run is detected, JobWatch:
+1. **Calls Claude (Anthropic's AI)** with a set of tools that can query the database — looking at recent data rows, the job's error log, and pipeline metrics.
+2. Claude **iteratively uses those tools** (up to 5 rounds) to gather evidence, like a detective piecing together what went wrong.
+3. Claude then produces a **structured incident report** covering: root cause, evidence found, where to look in the code, and recommended action.
+
+---
+
+## How do alerts get delivered?
+
+A short incident report with exactly these three sections, in this order is delivered on Slack:
+
+1. **Root cause** — one paragraph. Quote concrete evidence from tool calls.
+2. **Evidence** — bullet list. Each bullet names the tool used and the reference log file with timestamp.
+3. **Recommended action** — one line, possible fixes and files to check.
+---
+
+## What else is included?
+
+- An **MCP (Model Context Protocol) server** is also exposed, which allows external AI tools (like the MCP Inspector) to connect and use the same database-querying tools interactively.
+Samples of the MCP server in action are included in [`docs/imgs/`](docs/imgs)
+- **Prometheus metrics** are emitted so you could hook up a Grafana dashboard in the future.
+- **Fault injection scripts and tests** are included to deliberately break the pipeline and verify that the monitoring and diagnosis system catches it correctly.
+
+
+**Example of Slack alert:**
+
+![Slack message example](docs/imgs/slack_msg.png)
 
 ---
 
 ## The prompt
-
-The prompt IS the product. Verbatim, kept in sync at [`docs/sample_incidents/PROMPT.md`](docs/sample_incidents/PROMPT.md):
 
 ```
 You are an on-call reliability engineer for a daily financial data pipeline that ingests
@@ -111,60 +113,16 @@ make load-test             # writes docs/concurrency_findings.md + PNG
 
 ---
 
-## Reliability — the on-caller pages on data failures AND MCP failures
+## Architecture
 
-Two failure surfaces; the project treats both.
+See [`docs/architecture.md`](docs/architecture.md) for the Mermaid diagram.
 
-**Data layer (pipeline/Postgres):** monitored by `src/monitor.py` polling `job_runs` every 5s for `status='failed'` OR `rows_written < threshold`. Each match fires the diagnose loop and fan-outs to Slack, `incidents.log`, and stdout. Verified end-to-end in `docs/sample_incidents/`.
+Four moving parts:
 
-**MCP layer (tools themselves):** every tool call is wrapped by the `_instrumented(...)` decorator (`src/mcp_server/server.py:27`), which:
-
-1. Catches any exception and returns a structured `{"error": str, "error_type": str}` dict. Tools never raise into the diagnose loop.
-2. Increments `mcp_tool_calls_total{tool, status}` on every call (success or error).
-3. Observes `mcp_tool_latency_seconds{tool}` for every call.
-
-This means a partial MCP failure — for example, Postgres dying mid-query — becomes *data the LLM reasons over* rather than a crash that eats the incident. Claude sees the error dict in its tool output, still produces a report, and the Slack message still goes out. The engineer is paged whether the pipeline broke, the DB broke, or an MCP tool itself broke.
-
-Verified by `tests/test_fault_injection.py` (4 tests):
-
-- Each of the three tools returns a structured error dict when the DB is unreachable.
-- The `status="error"` counter increments on every failed call.
-
-The matching Prometheus counters are scrapeable in one command:
-
-```bash
-make mcp-metrics
-# mcp_tool_calls_total{tool="get_job_log",status="ok"} 7
-# mcp_tool_calls_total{tool="get_job_log",status="error"} 1
-# mcp_tool_latency_seconds_bucket{tool="query_recent_rows",le="0.05"} 12
-# ...
-```
-
-### What this does NOT cover yet
-
-Be honest about the gap: if the MCP server **process** dies outright (or the Anthropic API times out), `diagnose()` raises and `monitor._handle_failure` catches it — but that branch only logs; it does not fan out to Slack. An engineer would see the failure in monitor logs or as a flatlined `mcp_tool_calls_total` counter on Prometheus, not as a page. Tracked in `BACKLOG.md` as the "MCP liveness alert" item; closing it is a two-line addition to the monitor plus one Prometheus absent() rule.
-
----
-
-## Concurrency finding — connection reuse eliminates the p95 tail
-
-`query_recent_rows` is the hot path under fan-out. The first draft used
-`psycopg.connect()` per call. At N=10 concurrent callers the p95 climbed past
-50ms even though the query itself is a single-row `ORDER BY ts DESC LIMIT 10`.
-
-Routing the same query through a warm `psycopg_pool.ConnectionPool` collapsed
-the tail by roughly an order of magnitude:
-
-| N  | conn p95 (ms) | pool p95 (ms) |
-|----|---------------|---------------|
-| 1  | 14.9          | 1.1           |
-| 3  | 71.1          | 2.0           |
-| 5  | 96.3          | 2.7           |
-| 10 | 56.1          | 5.7           |
-
-Full numbers, chart, and reproduction script: [`docs/concurrency_findings.md`](docs/concurrency_findings.md).
-
-The fix is one line in `src/mcp_server/server.py` (`get_conn()` → `get_pool().connection()`); it's already applied.
+- **pipeline** — one-shot ingest; writes `ohlcv` rows and a `job_runs` audit row.
+- **monitor** — long-running poll over `job_runs`; triggers diagnosis on failures or `rows_written < threshold`.
+- **mcp_server** — stdio MCP server exposing three tools (`query_recent_rows`, `get_job_log`, `get_last_job_metrics`) + Prometheus on `:9100`.
+- **postgres** — one container, host port `5434`, schema in `sql/schema.sql`.
 
 ---
 
@@ -174,20 +132,9 @@ The fix is one line in `src/mcp_server/server.py` (`get_conn()` → `get_pool().
 
 ---
 
-## Known limitations (a.k.a. v2)
+## Future Enhancements
 
-See [`BACKLOG.md`](BACKLOG.md) for the full list. The load-bearing ones:
-
-- **No checkpoint for the monitor** — restart loses `last_seen_id` and will miss failures written while down. A dedicated checkpoint table (or separate durable store) closes this.
-- **No auth on the MCP server** — stdio only for now; any network exposure would need a token header.
-- **Pipeline can't write its own audit row if Postgres is down at connect time.** This is exactly the `docs/sample_incidents/01_postgres_down.md` scenario; the synthetic row in that capture stands in for the real one.
-- **No retry with backoff** on yfinance fetches — delisted tickers are logged and skipped.
-
----
-
-## Files worth reading first
-
-- [`src/diagnose.py`](src/diagnose.py) — the tool-use loop.
-- [`src/mcp_server/server.py`](src/mcp_server/server.py) — three tools, one decorator that guarantees structured errors.
-- [`src/monitor.py`](src/monitor.py) — the poll + fan-out.
-- [`docs/sample_incidents/`](docs/sample_incidents) — captured LLM outputs.
+- **Monitor checkpoint persistence** — Store `last_seen_id` in a durable store so the monitor resumes exactly where it left off after any restart or downtime.
+- **MCP server authentication** — Add token-based authentication to the MCP server, enabling secure network deployments beyond local communication
+- **Retry with backoff on yfinance fetches** — Transient fetch failures for delisted or temporarily unavailable tickers will be retried with exponential backoff before being logged and skipped, reducing false-positive failure reports.
+- **MCP liveness alerting** — Real-time notifications for MCP server crashes or LLM API timeouts, ensuring the engineers are alerted instantly if the system stops responding
