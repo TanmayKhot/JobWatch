@@ -12,7 +12,7 @@ from typing import Any, Callable
 from mcp.server.fastmcp import FastMCP
 
 from src.config import METRICS_PORT
-from src.db import get_conn
+from src.db import get_pool
 from src.metrics import (
     mcp_tool_calls_total,
     mcp_tool_latency_seconds,
@@ -64,7 +64,7 @@ def _rows(cur) -> list[dict[str, Any]]:
 @_instrumented("query_recent_rows")
 def query_recent_rows(ticker: str, limit: int = 10) -> dict[str, Any]:
     """Return the most recent OHLCV rows for a ticker, newest first."""
-    with get_conn() as conn, conn.cursor() as cur:
+    with get_pool().connection() as conn, conn.cursor() as cur:
         cur.execute(
             """
             SELECT ticker, ts, open, high, low, close, volume,
@@ -84,7 +84,7 @@ def query_recent_rows(ticker: str, limit: int = 10) -> dict[str, Any]:
 @_instrumented("get_job_log")
 def get_job_log(job_id: int | None = None) -> dict[str, Any]:
     """Return the most recent job_runs row (or a specific job_id), including log_snippet."""
-    with get_conn() as conn, conn.cursor() as cur:
+    with get_pool().connection() as conn, conn.cursor() as cur:
         if job_id is None:
             cur.execute(
                 """
@@ -115,7 +115,7 @@ def get_job_log(job_id: int | None = None) -> dict[str, Any]:
 @_instrumented("get_last_job_metrics")
 def get_last_job_metrics() -> dict[str, Any]:
     """Return compact metrics for the most recent job_runs row."""
-    with get_conn() as conn, conn.cursor() as cur:
+    with get_pool().connection() as conn, conn.cursor() as cur:
         cur.execute(
             """
             SELECT id, status, rows_written, error_type,
