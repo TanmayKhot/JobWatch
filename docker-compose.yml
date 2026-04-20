@@ -1,0 +1,21 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: jobwatch-postgres
+    environment:
+      POSTGRES_USER: jobwatch
+      POSTGRES_PASSWORD: jobwatch
+      POSTGRES_DB: jobwatch
+    ports:
+      - "5434:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./sql/schema.sql:/docker-entrypoint-initdb.d/10-schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U jobwatch -d jobwatch"]
+      interval: 2s
+      timeout: 2s
+      retries: 20
+
+volumes:
+  postgres_data:

@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Env
+.env
+.env.local
+
+# Logs and local artifacts
+*.log
+incidents.log
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+
+# Build
+dist/
+build/
+
+# Transient PNGs; docs PNGs are tracked
+*.png
+!docs/**/*.png
