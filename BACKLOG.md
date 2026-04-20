@@ -2,12 +2,6 @@
 
 Items deferred during the 1-day build. Track here so nothing gets lost.
 
-## Pending manual input
-
-- [ ] **Slack incoming webhook URL** — add to `.env` as `SLACK_WEBHOOK_URL`.
-  Until it's set, `alert_sinks.post_to_slack()` is a silent no-op; stdout + `incidents.log` still receive every incident.
-  Once you paste the URL, re-run any demo flow (`make run-pipeline` → `make break-postgres` → monitor) and confirm a message lands in the channel.
-
 ## v2 / post-demo
 
 - [ ] Grafana dashboard panel (pipeline health: job runtime, row counts, error rate; MCP: tool latency + error rate).
