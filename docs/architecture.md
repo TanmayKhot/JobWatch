@@ -2,26 +2,15 @@
 
 ```mermaid
 flowchart LR
-    Y[yfinance] -->|OHLCV bars| P[pipeline.py]
-    P -->|INSERT ohlcv| DB[(Postgres)]
-    P -->|INSERT job_runs audit row| DB
-    P -->|histogram + counters| M[/metrics :9100/]
-
-    MON[monitor.py] -->|poll job_runs| DB
-    MON -->|on failure or rows<threshold| D[diagnose.py]
-
-    D -->|messages.create + tools| LLM[Claude Haiku]
-    LLM -->|tool_use| TOOLS{MCP tools}
-    TOOLS -->|query_recent_rows| DB
-    TOOLS -->|get_job_log| DB
-    TOOLS -->|get_last_job_metrics| DB
-    TOOLS -->|counter + latency| M
-
-    D -->|root cause + evidence + action| F[fan_out]
-    F --> S[Slack webhook]
-    F --> L[incidents.log]
-    F --> O[stdout]
+    Y[yfinance] --> P[pipeline]
+    P --> DB[(Postgres)]
+    MON[monitor] -. polls .-> DB
+    MON -->|on failure| D[diagnose + Claude]
+    D <-->|MCP tools| DB
+    D --> A[Slack · incidents.log · stdout]
 ```
+
+Six moving parts, one direction of flow: `pipeline` writes to `Postgres`; `monitor` polls; on a bad `job_runs` row, `diagnose` runs the Claude tool-use loop against the MCP tools (which read `Postgres`) and fans the result out to Slack, a local log, and stdout.
 
 ## Processes
 
@@ -35,6 +24,6 @@ flowchart LR
 - `ohlcv(ticker, ts, open, high, low, close, volume, rolling_avg_20, anomaly)` — PK `(ticker, ts)`, idempotent via `ON CONFLICT`.
 - `job_runs(id, started_at, finished_at, status, rows_written, error_type, error_message, log_snippet)` — one row per pipeline invocation; `log_snippet` captures the last ~2KB of stderr from the run for the LLM to read.
 
-## Diagnosis loop
+## MCP tool shape
 
-Anthropic tool-use, max 5 iterations. Tools are the three MCP tools, called in-process (same Python module) — the MCP server is the *shape* we expose, but diagnose doesn't go through stdio to itself.
+All three tools return `dict[str, Any]` and never raise — the `_instrumented` decorator guarantees `{"error", "error_type"}` on failure. This lets the diagnose loop treat MCP failures as data the LLM reasons over, not as crashes that swallow the alert.

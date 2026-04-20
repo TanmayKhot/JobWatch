@@ -111,6 +111,41 @@ make load-test             # writes docs/concurrency_findings.md + PNG
 
 ---
 
+## Reliability — the on-caller pages on data failures AND MCP failures
+
+Two failure surfaces; the project treats both.
+
+**Data layer (pipeline/Postgres):** monitored by `src/monitor.py` polling `job_runs` every 5s for `status='failed'` OR `rows_written < threshold`. Each match fires the diagnose loop and fan-outs to Slack, `incidents.log`, and stdout. Verified end-to-end in `docs/sample_incidents/`.
+
+**MCP layer (tools themselves):** every tool call is wrapped by the `_instrumented(...)` decorator (`src/mcp_server/server.py:27`), which:
+
+1. Catches any exception and returns a structured `{"error": str, "error_type": str}` dict. Tools never raise into the diagnose loop.
+2. Increments `mcp_tool_calls_total{tool, status}` on every call (success or error).
+3. Observes `mcp_tool_latency_seconds{tool}` for every call.
+
+This means a partial MCP failure — for example, Postgres dying mid-query — becomes *data the LLM reasons over* rather than a crash that eats the incident. Claude sees the error dict in its tool output, still produces a report, and the Slack message still goes out. The engineer is paged whether the pipeline broke, the DB broke, or an MCP tool itself broke.
+
+Verified by `tests/test_fault_injection.py` (4 tests):
+
+- Each of the three tools returns a structured error dict when the DB is unreachable.
+- The `status="error"` counter increments on every failed call.
+
+The matching Prometheus counters are scrapeable in one command:
+
+```bash
+make mcp-metrics
+# mcp_tool_calls_total{tool="get_job_log",status="ok"} 7
+# mcp_tool_calls_total{tool="get_job_log",status="error"} 1
+# mcp_tool_latency_seconds_bucket{tool="query_recent_rows",le="0.05"} 12
+# ...
+```
+
+### What this does NOT cover yet
+
+Be honest about the gap: if the MCP server **process** dies outright (or the Anthropic API times out), `diagnose()` raises and `monitor._handle_failure` catches it — but that branch only logs; it does not fan out to Slack. An engineer would see the failure in monitor logs or as a flatlined `mcp_tool_calls_total` counter on Prometheus, not as a page. Tracked in `BACKLOG.md` as the "MCP liveness alert" item; closing it is a two-line addition to the monitor plus one Prometheus absent() rule.
+
+---
+
 ## Concurrency finding — connection reuse eliminates the p95 tail
 
 `query_recent_rows` is the hot path under fan-out. The first draft used

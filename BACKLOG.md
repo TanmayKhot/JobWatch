@@ -4,6 +4,7 @@ Items deferred during the 1-day build. Track here so nothing gets lost.
 
 ## v2 / post-demo
 
+- [ ] **MCP liveness alert** — if the MCP server process dies or `diagnose()` raises (Anthropic API down, etc.), the monitor currently logs but does not fan out. Fix: wrap `_handle_failure`'s diagnose call so that a raised exception *also* triggers `fan_out(...)` with a short "MCP/diagnose unavailable for job_id=N" body, and add a Prometheus `absent(mcp_tool_calls_total) > 5m` rule.
 - [ ] Grafana dashboard panel (pipeline health: job runtime, row counts, error rate; MCP: tool latency + error rate).
 - [ ] PagerDuty sink (parallel to Slack) — reuse incident-body formatting, add PD routing key.
 - [ ] Retry with exponential backoff on yfinance fetch (currently logs and skips).
