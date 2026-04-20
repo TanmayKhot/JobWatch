@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -13,6 +14,19 @@ from src.config import SLACK_WEBHOOK_URL
 log = logging.getLogger(__name__)
 
 INCIDENT_LOG_PATH = Path("incidents.log")
+
+_BOLD_RE = re.compile(r"\*\*(.+?)\*\*", re.DOTALL)
+_LEADING_INCIDENT_RE = re.compile(r"^Incident \(job_id=[^)]+\)\s*\n+", re.MULTILINE)
+
+
+def _to_slack_mrkdwn(text: str) -> str:
+    """Convert the diagnosis body to Slack's mrkdwn dialect.
+
+    - **bold** -> *bold* (Slack's single-asterisk bold)
+    - Strip the duplicate "Incident (...)" header; the Block Kit header already shows it.
+    """
+    text = _LEADING_INCIDENT_RE.sub("", text, count=1)
+    return _BOLD_RE.sub(r"*\1*", text)
 
 
 def post_to_slack(
@@ -50,9 +64,10 @@ def print_to_stdout(summary: str) -> None:
 
 def build_slack_blocks(job_id: int | None, status: str, diagnosis: str) -> list[dict]:
     header = f"JobWatch incident — job_id={job_id if job_id is not None else '?'} ({status})"
+    body = _to_slack_mrkdwn(diagnosis)
     return [
         {"type": "header", "text": {"type": "plain_text", "text": header}},
-        {"type": "section", "text": {"type": "mrkdwn", "text": diagnosis}},
+        {"type": "section", "text": {"type": "mrkdwn", "text": body}},
     ]
 
 
