@@ -42,7 +42,7 @@ mcp-metrics:
 	curl -s http://localhost:9100/metrics | grep -E '^mcp_tool|^# HELP mcp'
 
 test:
-	uv run pytest -v
+	uv run python -m pytest -v
 
 break-postgres:
 	docker compose stop postgres

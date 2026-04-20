@@ -2,6 +2,7 @@
 name = "jobwatch"
 version = "0.1.0"
 description = "Financial data pipeline monitor with an MCP-backed AI-Ops agent for plain-English incident diagnosis."
+readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "yfinance>=0.2.40",
